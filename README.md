@@ -112,9 +112,10 @@ python eso_addon_manager.py unlock 57      # updates allowed again
   always asks first — `Did you mean HarvestMap [57]? [y/N]` for one match, or a numbered list when there are several (Enter = cancel).
 - Locked addons are skipped by `update` and `update -y` (so also by a timer) and shown as
   `locked at 3.16.1 (3.17.0 available)`. The lock survives `scan`; `list` marks locked addons.
-- Older versions are not in ESOUI's API, so they are read from the addon's web page (the archived-files table).
-  If ESOUI changes that page or refuses the request, the tool says so and saves the page it received to
-  `last_esoui_page.html` in the app folder. Authors can delete old versions, so not every one is available.
+- Older versions are not in ESOUI’s API, so they are read from the addon’s web page (the archived-files table).
+  Authors can delete old versions, and the page may still list a version that has been removed, so not every listed
+  version can be installed. If ESOUI changes the page layout or refuses the request, the tool says so and saves the
+  page it received to `last_esoui_page.html` in the app folder.
 - Installing an older version replaces the addon's folders cleanly, so no files from the newer version are left behind.
   SavedVariables are never touched.
 
