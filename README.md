@@ -30,6 +30,55 @@ It is a single file with no dependencies — you only need **Python 3.9 or newer
 
 On macOS a scheduled run is done with `launchd` (or `cron`) rather than a systemd timer; the command is the same.
 
+## Tab completion (zsh, bash, fish)
+The completion script is generated from the script itself, so it always matches the commands and options.
+Regenerate it after updating the script. Pick your shell:
+
+**zsh**
+```
+mkdir -p ~/.zfunc
+eso-addons completion zsh > ~/.zfunc/_eso-addons
+```
+Make sure `~/.zshrc` has these lines, in this order (skip any you already have), then open a new terminal:
+```
+fpath=(~/.zfunc $fpath)
+autoload -Uz compinit && compinit
+```
+
+*Or, without a file:* put this in `~/.zshrc` **after** `compinit` — it regenerates the completion each time a shell
+starts, so it is always current (it costs one quick Python start per new shell):
+```
+if command -v eso-addons > /dev/null; then
+  source <(eso-addons completion zsh)
+fi
+```
+It registers the completion for the command name you ran it as, so this also works for a copy or symlink with another
+name such as `eso-addons.py`.
+
+**bash** (needs no extra package)
+```
+mkdir -p ~/.local/share/bash-completion/completions
+eso-addons completion bash > ~/.local/share/bash-completion/completions/eso-addons
+```
+Open a new terminal. (If your bash doesn't load that folder, add `source <(eso-addons completion bash)` to `~/.bashrc`.)
+
+**fish**
+```
+mkdir -p ~/.config/fish/completions
+eso-addons completion fish > ~/.config/fish/completions/eso-addons.fish
+```
+Fish picks it up automatically.
+
+What completes (same in all three; zsh and fish also show a description next to each item):
+- commands and their options
+- addon IDs and names for `list`, `lock`, `unlock`, `versions`, `info` and `remove` (plus folder names for `remove`)
+- `live` / `pts` after `-e` and for `copy`, and after a `pts` prefix (`eso-addons pts lock <Tab>` offers the pts addons)
+- backup numbers and `latest` for `restore`, fixed choices such as `--saved-vars` and `--with`, and folders for `--set-dir` / `--backup-dir`
+
+It works for the command names `eso-addons` and `eso_addon_manager.py` when run directly (the file must be executable or on
+your PATH). Completion only reads your config: it never touches the network or writes anything. Bash leaves out
+`local:Folder` IDs because bash splits words at `:`; the folder names are offered instead.
+
 ## Where files are kept
 | File | Where | What |
 |---|---|---|
@@ -201,6 +250,7 @@ python eso_addon_manager.py config --default-env pts   # change what "no environ
 | `copy [SOURCE] DEST` | Copy an environment's AddOns to another, e.g. `copy live pts` |
 | `backup` / `backups` / `restore` | Zip your settings and SavedVariables (`-e pts` for pts), list the zips, restore one |
 | `ttc` | Download the Tamriel Trade Centre price table now |
+| `completion zsh` / `bash` / `fish` | Print the tab-completion script for that shell |
 | `setup` | Guided setup: game folder, default version, saved-settings behaviour |
 | `config` | Show settings; `--set-dir <path>` / `--set-dir search [folder]`, `--saved-vars`, `--default-env` change them |
 

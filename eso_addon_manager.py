@@ -2297,6 +2297,316 @@ def cmd_match(args, cfg: dict) -> None:
 HEADER_COMMANDS = {"scan", "match", "update", "list", "remove", "install", "ttc", "lock", "unlock", "versions", "backup", "backups", "restore"}
 NEEDS_FOLDER    = {"scan", "match", "update", "remove", "ttc"}
 
+# ── Shell completion (zsh) ───────────────────────────────────────────────────
+# `completion zsh` prints a completion script built from the argument parser, so it always matches
+# the commands and options. The script asks `_complete <kind> [env]` for live values (addon IDs and
+# names, folder names, backups). `_complete` only reads files: no network, no writes, no prompts.
+
+def _read_store_quietly() -> dict:
+    try:
+        loc = read_location()
+        path = Path(loc) / "config.json" if loc and (Path(loc) / "config.json").is_file() else CONFIG_FILE
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+def completion_candidates(kind: str, env: str | None = None) -> list:
+    store = _read_store_quietly()
+    if not store:
+        return []
+    env = (env or store.get("default_env") or "live").lower()
+    installed = (store.get("envs", {}).get(env, {}) or {}).get("installed", {})
+    root = Path(store.get("root") or "")
+    out = []
+    if kind == "tracked":                         # "ID:Name" lines for zsh _describe
+        for key, info in sorted(installed.items(), key=lambda kv: kv[1].get("name", "").lower()):
+            out.append(f"{key.replace(':', chr(92) + ':')}:{info.get('name', key)}")
+    elif kind == "tracked-tab":                   # "ID<TAB>Name" lines (fish)
+        for key, info in sorted(installed.items(), key=lambda kv: kv[1].get("name", "").lower()):
+            out.append(f"{key}\t{info.get('name', key)}")
+    elif kind == "ids":                           # ESOUI IDs only (bash)
+        out = sorted((k for k in installed if k.isdigit()), key=int)
+    elif kind == "names":
+        out = sorted({i.get("name", "") for i in installed.values() if i.get("name")}, key=str.lower)
+    elif kind == "folders":
+        try:
+            out = sorted(d.name for d in (root / env / "AddOns").iterdir() if d.is_dir())
+        except OSError:
+            out = []
+    elif kind == "envs":
+        out = sorted(set(ENV_NAMES) | set(available_envs(root))) if root.is_dir() else list(ENV_NAMES)
+    elif kind == "backups":
+        try:
+            items = list_backups(backup_dir(dict(store)), env)
+        except OSError:
+            items = []
+        out = ["latest:the newest backup"] + [f"{n}:{p.name}" for n, (p, _) in enumerate(items[:15], 1)]
+    elif kind == "backups-tab":
+        try:
+            items = list_backups(backup_dir(dict(store)), env)
+        except OSError:
+            items = []
+        out = ["latest\tthe newest backup"] + [f"{n}\t{p.name}" for n, (p, _) in enumerate(items[:15], 1)]
+    elif kind == "backups-words":                 # plain words (bash)
+        try:
+            items = list_backups(backup_dir(dict(store)), env)
+        except OSError:
+            items = []
+        out = ["latest"] + [str(n) for n in range(1, min(len(items), 15) + 1)]
+    return out
+
+# completer for the positional arguments of each command (functions are defined in the script below)
+_ZSH_POSITIONALS = {
+    "list": "_eso_tracked", "info": "_eso_tracked", "lock": "_eso_tracked", "unlock": "_eso_tracked",
+    "versions": "_eso_tracked", "remove": "_eso_removable", "restore": "_eso_backups", "copy": "_eso_envs",
+}
+_ZSH_OPTION_VALUES = {"--env": "_eso_envs", "--set-dir": "_files -/", "--backup-dir": "_files -/",
+                      "--default-env": "_eso_envs", "--with": "(screenshots addons none)",
+                      "--backup-with": "(screenshots addons none)"}
+_POSITIONAL_KINDS = {"list": "tracked", "info": "tracked", "lock": "tracked", "unlock": "tracked",
+                     "versions": "tracked", "remove": "removable", "restore": "backups", "copy": "envs"}
+
+def _model(parser: argparse.ArgumentParser) -> list:
+    """[(command, help, [(option strings, help, takes a value, value kind)], positional kind or None)]"""
+    subs = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    helps = {a.dest: a.help or "" for a in subs._choices_actions}
+    model = []
+    for name, sp in subs.choices.items():
+        opts = []
+        for act in sp._actions:
+            if isinstance(act, argparse._HelpAction) or not act.option_strings:
+                continue
+            takes = act.nargs != 0
+            kind = None
+            if takes:
+                if act.choices:
+                    kind = "words:" + " ".join(str(v) for v in act.choices)
+                elif act.option_strings[-1] in ("--env", "--default-env"):
+                    kind = "envs"
+                elif act.option_strings[-1] in ("--set-dir", "--backup-dir"):
+                    kind = "dirs"
+                elif act.option_strings[-1] in ("--with", "--backup-with"):
+                    kind = "words:screenshots addons none"
+            opts.append((list(act.option_strings), act.help or "", takes, kind))
+        model.append((name, helps.get(name, ""), opts, _POSITIONAL_KINDS.get(name)))
+    return model
+
+def completion_names() -> str:
+    """Command names the completion is registered for: the usual two, plus the name this was run as
+    (so it also works for a copy or symlink called e.g. eso-addons.py)."""
+    names = ["eso-addons", "eso_addon_manager.py"]
+    me = os.path.basename(sys.argv[0] or "")
+    if me and me not in names and re.fullmatch(r"[A-Za-z0-9._+-]+", me) and me not in ("-c", "-m"):
+        names.append(me)
+    return " ".join(names)
+
+def bash_completion(parser: argparse.ArgumentParser) -> str:
+    model = _model(parser)
+    cmds = " ".join(m_[0] for m_ in model)
+    L = ["# ESO Addon Manager — bash completion.  Generated by:  eso-addons completion bash",
+         "# Install:  eso-addons completion bash > ~/.local/share/bash-completion/completions/eso-addons", "",
+         "_eso_addons() {",
+         "  local cur=${COMP_WORDS[COMP_CWORD]} cword=$COMP_CWORD env=\"\" cmd prev i list opts",
+         "  local -a words=(\"${COMP_WORDS[@]}\")",
+         "  cur=${cur//\\\\/}                                   # unescape \\  so names with spaces match",
+         "  if (( cword > 1 )) && [[ ${words[1]} == live || ${words[1]} == pts ]]; then",
+         "    env=${words[1]}; words=(\"${words[0]}\" \"${words[@]:2}\"); (( cword-- ))",
+         "  fi",
+         "  for (( i = 1; i < ${#words[@]} - 1; i++ )); do",
+         "    [[ ${words[i]} == -e || ${words[i]} == --env ]] && env=${words[i+1]}",
+         "  done",
+         "  local prog=${words[0]} IFS=$'\\n'",
+         "  COMPREPLY=()",
+         "  _eso_reply() {                                       # $1 = candidates, one per line; filter on $cur, escape",
+         "    local c",
+         "    while IFS= read -r c; do [[ -n $c && $c == \"$cur\"* ]] && COMPREPLY+=(\"$(printf '%q' \"$c\")\"); done <<< \"$1\"",
+         "  }",
+         f"  if (( cword == 1 )); then",
+         f"    printf -v list '%s\\n' {cmds} -h --help" + ("" ) + "",
+         "    [[ -z $env ]] && list+=$'live\\npts\\n'",
+         "    _eso_reply \"$list\"; return",
+         "  fi",
+         "  cmd=${words[1]}; prev=${words[cword-1]}",
+         "  case $prev in"]
+    # option values, global by option name
+    seen = {}
+    for name, h, opts, pos in model:
+        for strs, hh, takes, kind in opts:
+            if takes and kind:
+                for st in strs:
+                    seen.setdefault(st, kind)
+    for st, kind in seen.items():
+        if kind.startswith("words:"):
+            body = f"_eso_reply \"$(printf '%s\\n' {kind[6:]})\""
+        elif kind == "envs":
+            body = "_eso_reply \"$(\"$prog\" _complete envs 2>/dev/null)\""
+        else:
+            body = "compopt -o filenames 2>/dev/null; COMPREPLY=($(compgen -d -- \"$cur\"))"
+        L += [f"    {st}) {body}; return ;;"]
+    L += ["  esac", "  if [[ $cur == -* ]]; then", "    case $cmd in"]
+    for name, h, opts, pos in model:
+        flat = " ".join(["-h", "--help"] + [x for strs, *_ in opts for x in strs])
+        L.append(f"      {name}) opts=\"{flat}\" ;;")
+    L += ["      *) opts=\"-h --help\" ;;", "    esac",
+          "    _eso_reply \"${opts// /$'\\n'}\"; return", "  fi",
+          "  case $cmd in"]
+    L += ["    list|info|lock|unlock|versions)",
+          "      _eso_reply \"$({ \"$prog\" _complete ids $env; \"$prog\" _complete names $env; } 2>/dev/null)\" ;;",
+          "    remove)",
+          "      _eso_reply \"$({ \"$prog\" _complete ids $env; \"$prog\" _complete names $env; \"$prog\" _complete folders $env; } 2>/dev/null)\" ;;",
+          "    restore) _eso_reply \"$(\"$prog\" _complete backups-words $env 2>/dev/null)\" ;;",
+          "    copy)    _eso_reply \"$(\"$prog\" _complete envs 2>/dev/null)\" ;;",
+          "  esac", "}", "",
+          "complete -F _eso_addons " + completion_names(), ""]
+    return "\n".join(L)
+
+def fish_completion(parser: argparse.ArgumentParser) -> str:
+    model = _model(parser)
+    q = lambda t: "'" + (t or "").replace("\\", "\\\\").replace("'", "\\'") + "'"
+    L = ["# ESO Addon Manager — fish completion.  Generated by:  eso-addons completion fish",
+         "# Install:  eso-addons completion fish > ~/.config/fish/completions/eso-addons.fish", "",
+         "function __eso_tokens   # words typed so far, minus the program name and a live/pts prefix",
+         "    set -l t (commandline -opc)",
+         "    set -e t[1]",
+         "    if test (count $t) -gt 0; and contains -- $t[1] live pts; set -e t[1]; end",
+         "    test (count $t) -gt 0; and printf '%s\\n' $t",
+         "end",
+         "function __eso_prog; set -l t (commandline -opc); echo $t[1]; end",
+         "function __eso_env",
+         "    set -l t (commandline -opc)",
+         "    set -e t[1]",
+         "    set -l e",
+         "    if test (count $t) -gt 0; and contains -- $t[1] live pts; set e $t[1]; end",
+         "    for i in (seq 1 (count $t))",
+         "        if contains -- $t[$i] -e --env; and test $i -lt (count $t); set e $t[(math $i + 1)]; end",
+         "    end",
+         "    echo $e",
+         "end",
+         "function __eso_no_cmd;  test (count (__eso_tokens)) -eq 0; end",
+         "function __eso_using",
+         "    set -l t (__eso_tokens)",
+         "    test (count $t) -gt 0; and contains -- $t[1] $argv",
+         "end",
+         "function __eso_no_prefix; set -l t (commandline -opc); set -e t[1]; test (count $t) -eq 0; end",
+         "function __eso_call; set -l p (__eso_prog); set -l e (__eso_env); command $p _complete $argv[1] $e 2>/dev/null; end",
+         "function __eso_tracked;   __eso_call tracked-tab; __eso_call names; end",
+         "function __eso_removable; __eso_call tracked-tab; __eso_call names; __eso_call folders; end",
+         "function __eso_backups;   __eso_call backups-tab; end",
+         "function __eso_envs;      set -l p (__eso_prog); command $p _complete envs 2>/dev/null; end", ""]
+    L += ["for __p in " + completion_names(),
+          "    complete -c $__p -f",
+          "    complete -c $__p -n __eso_no_cmd -s h -l help -d 'show help'",
+          "    complete -c $__p -n __eso_no_prefix -a 'live pts' -d 'environment prefix'"]
+    for name, h, opts, pos in model:
+        L.append(f"    complete -c $__p -n __eso_no_cmd -a {name} -d {q(h)}")
+    for name, h, opts, pos in model:
+        L.append(f"    complete -c $__p -n '__eso_using {name}' -s h -l help -d 'show help'")
+        for strs, hh, takes, kind in opts:
+            parts = [f"complete -c $__p -n '__eso_using {name}'"]
+            for st in strs:
+                parts.append(f"-s {st[1]}" if (len(st) == 2) else f"-l {st[2:]}")
+            parts.append(f"-d {q(hh)}")
+            if takes:
+                if kind and kind.startswith("words:"):
+                    parts.append(f"-x -a {q(kind[6:])}")
+                elif kind == "envs":
+                    parts.append("-x -a '(__eso_envs)'")
+                elif kind == "dirs":
+                    parts.append("-r -a '(__fish_complete_directories)'")
+                else:
+                    parts.append("-x")
+            L.append("    " + " ".join(parts))
+        fn = {"tracked": "__eso_tracked", "removable": "__eso_removable", "backups": "__eso_backups", "envs": "__eso_envs"}.get(pos)
+        if fn:
+            L.append(f"    complete -c $__p -n '__eso_using {name}' -a '({fn})'")
+    L += ["end", "set -e __p", ""]
+    return "\n".join(L)
+
+
+
+def _zq(text: str) -> str:
+    """Quote text for a single-quoted zsh word, and escape the characters _arguments treats specially."""
+    text = (text or "").replace("[", "(").replace("]", ")").replace(":", " -")
+    return text.replace("'", "'\\''")
+
+def zsh_completion(parser: argparse.ArgumentParser) -> str:
+    subs = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    helps = {a.dest: a.help or "" for a in subs._choices_actions}
+    lines = ["#compdef " + completion_names(),
+             "# ESO Addon Manager — zsh completion.  Generated by:  eso-addons completion zsh", ""]
+    lines += [
+        "_eso_call()    { \"$_eso_prog\" _complete \"$@\" 2>/dev/null }",
+        "_eso_envarg()  { print -r -- ${opt_args[-e]:-${opt_args[--env]:-$_eso_envname}} }",
+        "_eso_envs()    { local -a v; v=(${(f)\"$(_eso_call envs)\"}); compadd -X 'environment' -- $v }",
+        "_eso_tracked() {",
+        "  local -a ids names; local e=$(_eso_envarg)",
+        "  ids=(${(f)\"$(_eso_call tracked $e)\"}); names=(${(f)\"$(_eso_call names $e)\"})",
+        "  _describe -t ids 'addon ID' ids",
+        "  compadd -X 'addon name' -- $names",
+        "}",
+        "_eso_removable() {",
+        "  local -a folders; local e=$(_eso_envarg)",
+        "  _eso_tracked",
+        "  folders=(${(f)\"$(_eso_call folders $e)\"}); compadd -X 'folder in AddOns' -- $folders",
+        "}",
+        "_eso_backups() { local -a b; b=(${(f)\"$(_eso_call backups $(_eso_envarg))\"}); _describe -t backups 'backup' b }",
+        "",
+        "_eso_addons() {",
+        "  local curcontext=\"$curcontext\" state line ret=1",
+        "  typeset -A opt_args",
+        "  local _eso_prog=${words[1]} _eso_envname=\"\"",
+        "  # \"pts list\": an environment name in front of the command",
+        "  if [[ $CURRENT -gt 2 && ${words[2]} == (live|pts) ]]; then",
+        "    _eso_envname=${words[2]}; words=(\"${words[1]}\" \"${(@)words[3,-1]}\"); (( CURRENT-- ))",
+        "  fi",
+        "  _arguments -C '(- *)'{-h,--help}'[show help]' '1: :->command' '*:: :->args' && ret=0",
+        "  case $state in",
+        "    command)",
+        "      local -a cmds=(",
+    ]
+    for name, sp in subs.choices.items():
+        lines.append(f"        '{name}:{_zq(helps.get(name, ''))}'")
+    lines += [
+        "      )",
+        "      _describe -t commands 'command' cmds && ret=0",
+        "      [[ $CURRENT -eq 2 && -z $_eso_envname ]] && compadd -X 'environment prefix' -- live pts",
+        "      ;;",
+        "    args)",
+        "      case $words[1] in",
+    ]
+    for name, sp in subs.choices.items():
+        specs = []
+        for act in sp._actions:
+            if isinstance(act, argparse._HelpAction):
+                continue
+            h = _zq(act.help or "")
+            if act.option_strings:
+                opts = act.option_strings
+                if len(opts) > 1:
+                    prefix = f"'({' '.join(opts)})'{{{','.join(opts)}}}'"
+                else:
+                    prefix = f"'{opts[0]}"
+                value = ""
+                if act.nargs != 0:
+                    comp = (f"({' '.join(str(v) for v in act.choices)})" if act.choices
+                            else _ZSH_OPTION_VALUES.get(opts[-1], ""))
+                    value = f":{_zq((act.metavar or act.dest or 'value').lower())}:{comp}"
+                specs.append(f"{prefix}[{h}]{value}'")
+            elif name != "config":
+                many = act.nargs in ("+", "*")
+                position = "*" if many else ("1:" if act.nargs == "?" else "1")
+                comp = _ZSH_POSITIONALS.get(name, "")
+                specs.append(f"'{position}:{_zq(str(act.metavar or act.dest))}:{comp}'")
+        lines.append(f"        {name})")
+        lines.append("          _arguments -s \\")
+        for spec in specs:
+            lines.append(f"            {spec} \\")
+        lines.append("            && ret=0 ;;")
+    lines += ["      esac", "      ;;", "  esac", "  return ret", "}", "",
+              "if [[ ${funcstack[1]} == _eso-addons ]]; then", "  _eso_addons \"$@\"", "else", "  compdef _eso_addons " + completion_names(), "fi", ""]
+    return "\n".join(lines)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="eso-addons", description="Manage Elder Scrolls Online addons from ESOUI.com",
@@ -2353,6 +2663,8 @@ def build_parser() -> argparse.ArgumentParser:
     cp.add_argument("--mirror", action="store_true",
                     help="also delete addon folders in DEST that are not in SOURCE")
     cp.add_argument("-y", "--yes", action="store_true", help="Don't ask for confirmation")
+    cm = sub.add_parser("completion", help="Print a shell completion script (zsh, bash or fish)")
+    cm.add_argument("shell", choices=("zsh", "bash", "fish"))
     sub.add_parser("setup", help="Guided setup: game folder, default version, saved settings")
     cf = sub.add_parser("config", help="Show or change settings")
     cf.add_argument("--set-dir", nargs="+", metavar="PATH",
@@ -2437,7 +2749,17 @@ def main() -> None:
     prefix_env = None
     if len(argv) > 1 and argv[0].lower() in ENV_NAMES:      # "pts list"
         prefix_env, argv = argv[0].lower(), argv[1:]
+    if argv[:1] == ["_complete"]:                           # used by the shell completion script
+        try:
+            for line in completion_candidates(argv[1] if len(argv) > 1 else "", argv[2] if len(argv) > 2 else None):
+                print(line)
+        except Exception:
+            pass
+        return
     args = parser.parse_args(argv)
+    if args.command == "completion":
+        print({"zsh": zsh_completion, "bash": bash_completion, "fish": fish_completion}[args.shell](parser))
+        return
     handlers = {"scan": cmd_scan, "match": cmd_match, "update": cmd_update,
                 "list": cmd_list, "search": cmd_search, "install": cmd_install,
                 "remove": cmd_remove, "info": cmd_info, "config": cmd_config,
